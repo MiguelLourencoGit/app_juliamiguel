@@ -376,6 +376,73 @@ def carregar_movimentos():
     return pd.DataFrame(st.session_state.dados["movimentos"], columns=colunas).sort_values(["data_movimento", "id"], ascending=[False, False], na_position="last") if st.session_state.dados["movimentos"] else pd.DataFrame(columns=colunas)
 
 
+def criar_grafico_barras(resumo, campo_categoria, orientacao, escala, selecao=None):
+    ordenacao = alt.SortField(field="valor_absoluto", order="descending")
+    if orientacao == "Horizontal":
+        eixo_x = alt.X(
+            "valor_absoluto:Q",
+            title="Valor absoluto (€)",
+            scale=alt.Scale(domain=[0, escala]),
+        )
+        eixo_y = alt.Y(f"{campo_categoria}:N", title=None, sort=ordenacao)
+        rotulos = alt.Chart(resumo).mark_text(
+            align="left",
+            baseline="middle",
+            dx=5,
+            color="#F2C94C",
+            fontWeight="bold",
+        ).encode(
+            x="valor_absoluto:Q",
+            y=alt.Y(f"{campo_categoria}:N", sort=ordenacao),
+            text="valor_formatado:N",
+        )
+        altura = max(180, 36 * len(resumo))
+    else:
+        eixo_x = alt.X(
+            f"{campo_categoria}:N",
+            title=None,
+            sort=ordenacao,
+            axis=alt.Axis(labelAngle=-45),
+        )
+        eixo_y = alt.Y(
+            "valor_absoluto:Q",
+            title="Valor absoluto (€)",
+            scale=alt.Scale(domain=[0, escala]),
+        )
+        rotulos = alt.Chart(resumo).mark_text(
+            align="center",
+            baseline="bottom",
+            dy=-5,
+            color="#F2C94C",
+            fontWeight="bold",
+        ).encode(
+            x=alt.X(f"{campo_categoria}:N", sort=ordenacao),
+            y="valor_absoluto:Q",
+            text="valor_formatado:N",
+        )
+        altura = 360
+
+    barras = alt.Chart(resumo).mark_bar().encode(
+        x=eixo_x,
+        y=eixo_y,
+        color=alt.Color(
+            "sinal:N",
+            legend=None,
+            scale=alt.Scale(
+                domain=["Positivo", "Negativo", "Sem variação"],
+                range=["#218739", "#c62828", "#858585"],
+            ),
+        ),
+        tooltip=[
+            alt.Tooltip(f"{campo_categoria}:N", title="Categoria" if campo_categoria == "categoria" else "Descrição"),
+            alt.Tooltip("montante:Q", title="Total líquido (€)", format=",.2f"),
+        ],
+    )
+    if selecao is not None:
+        barras = barras.add_params(selecao)
+    return alt.layer(barras, rotulos).properties(height=altura)
+
+
 def aplicar_classificacao(movimento_id, categoria, descricao_personalizada, criar_regra, texto_regra):
     guardar_descricao(categoria, descricao_personalizada)
     for movimento in st.session_state.dados["movimentos"]:
@@ -635,21 +702,20 @@ else:
             fmt = lambda x: f"{x:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Rendimentos", fmt(rendimentos)); c2.metric("Despesas classificadas", fmt(despesas)); c3.metric("Transferências / poupanças", fmt(transferencias)); c4.metric("Variação líquida dos movimentos", fmt(variacao_saldo))
-            st.subheader("Totais por categoria")
             resumo_cat = mensal.groupby("categoria", dropna=False)["montante"].sum().reset_index()
             resumo_cat["Total de saídas (positivo)"] = resumo_cat["montante"].apply(lambda x: -x if x < 0 else 0)
             resumo_cat = resumo_cat.rename(columns={"categoria": "Categoria", "montante": "Montante"})
-            st.dataframe(resumo_cat[["Categoria", "Montante", "Total de saídas (positivo)"]], use_container_width=True, hide_index=True)
-            st.subheader("Totais por descrição")
+            with st.expander("Totais por categoria"):
+                st.dataframe(resumo_cat[["Categoria", "Montante", "Total de saídas (positivo)"]], use_container_width=True, hide_index=True)
             resumo_desc = mensal.groupby(["categoria", "descricao_personalizada"], dropna=False)["montante"].sum().reset_index()
             resumo_desc = resumo_desc.rename(columns={"categoria": "Categoria", "descricao_personalizada": "Descrição", "montante": "Montante"})
-            st.dataframe(resumo_desc, use_container_width=True, hide_index=True)
-            st.subheader("Movimentos do mês")
+            with st.expander("Totais por descrição"):
+                st.dataframe(resumo_desc, use_container_width=True, hide_index=True)
             movimentos_mes = mensal[["data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado"]].sort_values("data_movimento", ascending=False)
             movimentos_mes = movimentos_mes.rename(columns={"data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
-            st.dataframe(movimentos_mes, use_container_width=True, hide_index=True)
+            with st.expander("Movimentos do mês"):
+                st.dataframe(movimentos_mes, use_container_width=True, hide_index=True)
 
-            st.subheader("Valores líquidos por categoria")
             resumo_grafico = mensal.groupby("categoria", dropna=False)["montante"].sum().reset_index()
             resumo_grafico["valor_absoluto"] = resumo_grafico["montante"].abs()
             resumo_grafico["sinal"] = resumo_grafico["montante"].apply(
@@ -663,105 +729,52 @@ else:
                 clear="dblclick",
             )
             escala_valores = max(float(resumo_grafico["valor_absoluto"].max()), 1) * 1.18
-            barras_categoria = alt.Chart(resumo_grafico).mark_bar().encode(
-                x=alt.X(
-                    "valor_absoluto:Q",
-                    title="Valor absoluto (€)",
-                    scale=alt.Scale(domain=[0, escala_valores]),
-                ),
-                y=alt.Y(
-                    "categoria:N",
-                    title=None,
-                    sort=alt.SortField(field="valor_absoluto", order="descending"),
-                ),
-                color=alt.Color(
-                    "sinal:N",
-                    title=None,
-                    scale=alt.Scale(
-                        domain=["Positivo", "Negativo", "Sem variação"],
-                        range=["#218739", "#c62828", "#858585"],
-                    ),
-                ),
-                tooltip=[
-                    alt.Tooltip("categoria:N", title="Categoria"),
-                    alt.Tooltip("montante:Q", title="Total líquido (€)", format=",.2f"),
-                ],
-            ).add_params(selecao_categoria)
-            rotulos_categoria = alt.Chart(resumo_grafico).mark_text(
-                align="left",
-                baseline="middle",
-                dx=5,
-                color="#F2C94C",
-                fontWeight="bold",
-            ).encode(
-                x="valor_absoluto:Q",
-                y=alt.Y("categoria:N", sort=alt.SortField(field="valor_absoluto", order="descending")),
-                text="valor_formatado:N",
-            )
-            grafico_categoria = alt.layer(barras_categoria, rotulos_categoria).properties(
-                height=max(180, 36 * len(resumo_grafico))
-            )
-            evento_grafico = st.altair_chart(
-                grafico_categoria,
-                key="grafico_categorias_mes",
-                on_select="rerun",
-                selection_mode="categoria_selecionada",
-            )
+            with st.expander("Valores líquidos por categoria"):
+                orientacao_categoria = st.segmented_control(
+                    "Orientação do gráfico",
+                    ["Horizontal", "Vertical"],
+                    default="Horizontal",
+                    key="orientacao_grafico_categorias",
+                )
+                grafico_categoria = criar_grafico_barras(
+                    resumo_grafico,
+                    "categoria",
+                    orientacao_categoria or "Horizontal",
+                    escala_valores,
+                    selecao_categoria,
+                )
+                evento_grafico = st.altair_chart(
+                    grafico_categoria,
+                    key="grafico_categorias_mes",
+                    on_select="rerun",
+                    selection_mode="categoria_selecionada",
+                )
             selecao_grafico = evento_grafico.get("selection", {}) if isinstance(evento_grafico, dict) else evento_grafico.selection
             categorias_selecionadas = selecao_grafico.get("categoria_selecionada", [])
             if categorias_selecionadas:
                 categoria_selecionada = categorias_selecionadas[0].get("categoria")
                 if categoria_selecionada is not None:
-                    st.subheader(f"Detalhe por descrição: {categoria_selecionada}")
-                    detalhe_descricoes = mensal.loc[
-                        mensal["categoria"] == categoria_selecionada
-                    ].groupby("descricao_personalizada", dropna=False)["montante"].sum().reset_index()
-                    detalhe_descricoes["valor_absoluto"] = detalhe_descricoes["montante"].abs()
-                    detalhe_descricoes["sinal"] = detalhe_descricoes["montante"].apply(
-                        lambda valor: "Positivo" if valor > 0 else "Negativo" if valor < 0 else "Sem variação"
-                    )
-                    detalhe_descricoes["valor_formatado"] = detalhe_descricoes["valor_absoluto"].map(fmt)
-                    escala_descricoes = max(float(detalhe_descricoes["valor_absoluto"].max()), 1) * 1.18
-                    barras_descricoes = alt.Chart(detalhe_descricoes).mark_bar().encode(
-                        x=alt.X(
-                            "valor_absoluto:Q",
-                            title="Valor absoluto (€)",
-                            scale=alt.Scale(domain=[0, escala_descricoes]),
-                        ),
-                        y=alt.Y(
-                            "descricao_personalizada:N",
-                            title=None,
-                            sort=alt.SortField(field="valor_absoluto", order="descending"),
-                        ),
-                        color=alt.Color(
-                            "sinal:N",
-                            title=None,
-                            scale=alt.Scale(
-                                domain=["Positivo", "Negativo", "Sem variação"],
-                                range=["#218739", "#c62828", "#858585"],
-                            ),
-                        ),
-                        tooltip=[
-                            alt.Tooltip("descricao_personalizada:N", title="Descrição"),
-                            alt.Tooltip("montante:Q", title="Total líquido (€)", format=",.2f"),
-                        ],
-                    )
-                    rotulos_descricoes = alt.Chart(detalhe_descricoes).mark_text(
-                        align="left",
-                        baseline="middle",
-                        dx=5,
-                        color="#F2C94C",
-                        fontWeight="bold",
-                    ).encode(
-                        x="valor_absoluto:Q",
-                        y=alt.Y(
-                            "descricao_personalizada:N",
-                            sort=alt.SortField(field="valor_absoluto", order="descending"),
-                        ),
-                        text="valor_formatado:N",
-                    )
-                    grafico_descricoes = alt.layer(barras_descricoes, rotulos_descricoes).properties(
-                        height=max(160, 32 * len(detalhe_descricoes))
-                    )
-                    st.altair_chart(grafico_descricoes, width="stretch")
+                    with st.expander(f"Detalhe por descrição: {categoria_selecionada}", expanded=True):
+                        detalhe_descricoes = mensal.loc[
+                            mensal["categoria"] == categoria_selecionada
+                        ].groupby("descricao_personalizada", dropna=False)["montante"].sum().reset_index()
+                        detalhe_descricoes["valor_absoluto"] = detalhe_descricoes["montante"].abs()
+                        detalhe_descricoes["sinal"] = detalhe_descricoes["montante"].apply(
+                            lambda valor: "Positivo" if valor > 0 else "Negativo" if valor < 0 else "Sem variação"
+                        )
+                        detalhe_descricoes["valor_formatado"] = detalhe_descricoes["valor_absoluto"].map(fmt)
+                        escala_descricoes = max(float(detalhe_descricoes["valor_absoluto"].max()), 1) * 1.18
+                        orientacao_descricoes = st.segmented_control(
+                            "Orientação do gráfico",
+                            ["Horizontal", "Vertical"],
+                            default="Horizontal",
+                            key="orientacao_grafico_descricoes",
+                        )
+                        grafico_descricoes = criar_grafico_barras(
+                            detalhe_descricoes,
+                            "descricao_personalizada",
+                            orientacao_descricoes or "Horizontal",
+                            escala_descricoes,
+                        )
+                        st.altair_chart(grafico_descricoes, width="stretch")
 
