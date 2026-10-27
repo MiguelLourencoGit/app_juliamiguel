@@ -14,6 +14,25 @@ import streamlit as st
 ARQUIVO_JSON_LOCAL = Path(__file__).resolve().parent / "financas_casal.json"
 
 st.set_page_config(page_title="Finanças do casal", page_icon="💶", layout="wide")
+st.markdown(
+    """
+    <style>
+    div[class*="st-key-remover_categoria_"] button:hover,
+    div[class*="st-key-remover_descricao_"] button:hover {
+        background: #c62828;
+        border-color: #c62828;
+        color: white;
+    }
+    div[class*="st-key-adicionar_descricao_"] button:hover,
+    div[class*="st-key-adicionar_categoria"] button:hover {
+        background: #218739;
+        border-color: #218739;
+        color: white;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 st.title("💶 Finanças do casal")
 st.caption("Importa movimentos bancários, classifica-os e acompanha as despesas ao longo do tempo.")
 
@@ -31,6 +50,7 @@ def estado_novo():
         "version": 1,
         "movimentos": [],
         "regras": [],
+        "categorias": CATEGORIAS.copy(),
         "descricoes": [{"categoria": c, "nome": n} for c, n in DESCRICOES_INICIAIS],
         "proximo_id_movimento": 1,
         "proximo_id_regra": 1,
@@ -49,6 +69,8 @@ def carregar_json_local():
         base.update(dados)
         base["movimentos"] = list(base.get("movimentos", []))
         base["regras"] = list(base.get("regras", []))
+        categorias_guardadas = dados.get("categorias", CATEGORIAS)
+        base["categorias"] = list(dict.fromkeys(c for c in categorias_guardadas if isinstance(c, str) and c.strip())) or CATEGORIAS.copy()
         base["descricoes"] = list(base.get("descricoes", []))
         base["proximo_id_movimento"] = max([int(m.get("id", 0)) for m in base["movimentos"]] + [0]) + 1
         base["proximo_id_regra"] = max([int(r.get("id", 0)) for r in base["regras"]] + [0]) + 1
@@ -69,9 +91,31 @@ def guardar_json_local():
 
 
 if "dados" not in st.session_state:
-    st.session_state.dados, _ = carregar_json_local()
+    st.session_state.dados, nome_carregado = carregar_json_local()
+    st.session_state.nome_json = nome_carregado
 if "nome_json" not in st.session_state:
-    st.session_state.nome_json = ARQUIVO_JSON_LOCAL.name if ARQUIVO_JSON_LOCAL.exists() else "Sessão nova (sem histórico carregado)"
+    st.session_state.nome_json = "Sessão nova (sem histórico carregado)"
+if "json_upload_hash" not in st.session_state:
+    st.session_state.json_upload_hash = None
+if "extrato_upload_hash" not in st.session_state:
+    st.session_state.extrato_upload_hash = None
+if "pagina_atual" not in st.session_state:
+    st.session_state.pagina_atual = "Resumo mensal"
+if "categoria_descricao_aberta" not in st.session_state:
+    st.session_state.categoria_descricao_aberta = None
+
+
+def abrir_importacao():
+    st.session_state.pagina_atual = "Importar histórico e novos movimentos"
+
+
+def navegar_para(pagina):
+    st.session_state.pagina_atual = pagina
+
+
+def alternar_adicao_descricao(categoria):
+    atual = st.session_state.categoria_descricao_aberta
+    st.session_state.categoria_descricao_aberta = None if atual == categoria else categoria
 
 
 def normalizar_nome(nome):
@@ -193,12 +237,84 @@ def ler_xml(conteudo_bytes):
 
 
 def classificar(descricao):
-    texto = str(descricao or "").lower()
-    regras = sorted([r for r in st.session_state.dados["regras"] if r.get("ativa", True)], key=lambda r: len(r.get("texto_contem", "")), reverse=True)
-    for regra in regras:
-        if regra["texto_contem"].lower() in texto:
-            return regra["categoria"], regra["descricao_personalizada"], "Automática"
-    return "Outros", "Por classificar", "Por classificar"
+    regra = regra_correspondente(descricao)
+    if regra:
+        return regra["categoria"], regra["descricao_personalizada"], "Automática"
+    categoria_padrao = "Outros" if "Outros" in categorias_atuais() else categorias_atuais()[0]
+    return categoria_padrao, "Por classificar", "Por classificar"
+
+
+def regra_correspondente(descricao):
+    texto = str(descricao or "").casefold()
+    regras = sorted(
+        [r for r in st.session_state.dados["regras"] if r.get("ativa", True)],
+        key=lambda r: len(r.get("texto_contem", "")),
+        reverse=True,
+    )
+    return next((r for r in regras if r.get("texto_contem", "").casefold() in texto), None)
+
+
+def categorias_atuais():
+    return st.session_state.dados.get("categorias", CATEGORIAS)
+
+
+def reclassificar_movimentos_automaticos(textos_relevantes=None):
+    textos_relevantes = [texto.casefold() for texto in (textos_relevantes or []) if texto]
+    for movimento in st.session_state.dados["movimentos"]:
+        descricao_original = str(movimento.get("descricao_original", ""))
+        associado_a_regra = movimento.get("regra_id") is not None
+        corresponde_texto = any(texto in descricao_original.casefold() for texto in textos_relevantes)
+        if movimento.get("estado") not in ("Automática", "Por classificar") and not associado_a_regra and not corresponde_texto:
+            continue
+        categoria, descricao, estado = classificar(movimento.get("descricao_original"))
+        regra = regra_correspondente(movimento.get("descricao_original"))
+        movimento.update({
+            "categoria": categoria,
+            "descricao_personalizada": descricao,
+            "estado": estado,
+            "regra_id": regra.get("id") if regra else None,
+        })
+        st.session_state.pop(f"categoria_movimento_edicao_{movimento['id']}", None)
+        st.session_state.pop(f"descricao_movimento_edicao_{movimento['id']}", None)
+
+
+def adicionar_categoria(nome):
+    nome = str(nome).strip()
+    if not nome or any(c.casefold() == nome.casefold() for c in categorias_atuais()):
+        return False
+    st.session_state.dados["categorias"].append(nome)
+    guardar_json_local()
+    return True
+
+
+def remover_categoria(categoria):
+    if categoria not in categorias_atuais() or len(categorias_atuais()) <= 1:
+        return
+    st.session_state.dados["categorias"].remove(categoria)
+    st.session_state.dados["descricoes"] = [d for d in st.session_state.dados["descricoes"] if d["categoria"] != categoria]
+    st.session_state.dados["regras"] = [r for r in st.session_state.dados["regras"] if r.get("categoria") != categoria]
+    for movimento in st.session_state.dados["movimentos"]:
+        if movimento.get("categoria") == categoria:
+            movimento.update({"categoria": "Outros" if "Outros" in categorias_atuais() else categorias_atuais()[0], "descricao_personalizada": "Por classificar", "estado": "Por classificar"})
+    reclassificar_movimentos_automaticos()
+    guardar_json_local()
+
+
+def remover_descricao(categoria, nome):
+    st.session_state.dados["descricoes"] = [
+        d for d in st.session_state.dados["descricoes"]
+        if not (d["categoria"] == categoria and d["nome"].casefold() == nome.casefold())
+    ]
+    for regra in st.session_state.dados["regras"]:
+        if regra.get("categoria") == categoria and regra.get("descricao_personalizada", "").casefold() == nome.casefold():
+            regra["descricao_personalizada"] = "Por classificar"
+    for movimento in st.session_state.dados["movimentos"]:
+        if movimento.get("categoria") == categoria and movimento.get("descricao_personalizada", "").casefold() == nome.casefold():
+            movimento["descricao_personalizada"] = "Por classificar"
+            if movimento.get("estado") == "Automática":
+                movimento["estado"] = "Por classificar"
+    reclassificar_movimentos_automaticos()
+    guardar_json_local()
 
 
 def guardar_descricao(categoria, nome):
@@ -234,7 +350,8 @@ def importar_movimentos(registos, origem, conta):
             ignorados += 1
             continue
         categoria, desc_personalizada, estado = classificar(descricao)
-        movimento = {"id": dados["proximo_id_movimento"], "data_movimento": data, "data_valor": data_valor, "descricao_original": str(descricao).strip(), "montante": montante, "saldo": saldo, "conta": conta_registo, "categoria": categoria, "descricao_personalizada": desc_personalizada, "estado": estado, "origem_ficheiro": origem, "fingerprint": fp}
+        regra = regra_correspondente(descricao)
+        movimento = {"id": dados["proximo_id_movimento"], "data_movimento": data, "data_valor": data_valor, "descricao_original": str(descricao).strip(), "montante": montante, "saldo": saldo, "conta": conta_registo, "categoria": categoria, "descricao_personalizada": desc_personalizada, "estado": estado, "regra_id": regra.get("id") if regra else None, "origem_ficheiro": origem, "fingerprint": fp}
         dados["movimentos"].append(movimento)
         dados["proximo_id_movimento"] += 1
         fingerprints.add(fp)
@@ -255,6 +372,7 @@ def aplicar_classificacao(movimento_id, categoria, descricao_personalizada, cria
             movimento["categoria"] = categoria
             movimento["descricao_personalizada"] = descricao_personalizada
             movimento["estado"] = "Manual"
+            movimento["regra_id"] = None
             break
     if criar_regra and texto_regra.strip():
         existente = next((r for r in st.session_state.dados["regras"] if r["texto_contem"].casefold() == texto_regra.strip().casefold()), None)
@@ -263,66 +381,106 @@ def aplicar_classificacao(movimento_id, categoria, descricao_personalizada, cria
         else:
             st.session_state.dados["regras"].append({"id": st.session_state.dados["proximo_id_regra"], "texto_contem": texto_regra.strip(), "categoria": categoria, "descricao_personalizada": descricao_personalizada, "ativa": True})
             st.session_state.dados["proximo_id_regra"] += 1
+            existente = st.session_state.dados["regras"][-1]
+        for movimento in st.session_state.dados["movimentos"]:
+            if movimento["id"] == movimento_id:
+                movimento["regra_id"] = existente["id"]
+                break
+        reclassificar_movimentos_automaticos([texto_regra.strip()])
     guardar_json_local()
 
-# Gestão do JSON: é opcional. Sem carregar JSON, a aplicação começa vazia e aceita CSV/XML normalmente.
-st.sidebar.header("Guardar e recuperar dados")
-st.sidebar.caption("Se houver um ficheiro JSON local na pasta da app, ele é carregado automaticamente na próxima vez que abrires a aplicação.")
-json_upload = st.sidebar.file_uploader("Carregar histórico (.json, opcional)", type=["json"], key="json_upload")
-if st.sidebar.button("Carregar JSON", use_container_width=True):
-    if json_upload is None:
-        st.sidebar.warning("Seleciona primeiro um ficheiro JSON.")
-    else:
-        try:
-            candidato = json.loads(json_upload.getvalue().decode("utf-8-sig"))
-            if not isinstance(candidato, dict) or not all(k in candidato for k in ("movimentos", "regras", "descricoes")):
-                raise ValueError("O JSON não tem a estrutura esperada da aplicação.")
-            base = estado_novo()
-            base.update(candidato)
-            base["movimentos"] = list(base.get("movimentos", []))
-            base["regras"] = list(base.get("regras", []))
-            base["descricoes"] = list(base.get("descricoes", []))
-            base["proximo_id_movimento"] = max([int(m.get("id", 0)) for m in base["movimentos"]] + [0]) + 1
-            base["proximo_id_regra"] = max([int(r.get("id", 0)) for r in base["regras"]] + [0]) + 1
-            st.session_state.dados = base
-            st.session_state.nome_json = json_upload.name
-            guardar_json_local()
-            st.sidebar.success(f"Histórico carregado: {json_upload.name}")
-        except Exception as exc:
-            st.sidebar.error(f"Não foi possível carregar o JSON: {exc}")
-if st.sidebar.button("Guardar no JSON local", use_container_width=True):
-    if guardar_json_local():
-        st.sidebar.success(f"Histórico guardado em: {ARQUIVO_JSON_LOCAL.name}")
-    else:
-        st.sidebar.error("Não foi possível guardar o JSON local.")
-st.sidebar.caption(f"Dados atuais: {st.session_state.nome_json}")
-json_bytes = json.dumps(st.session_state.dados, ensure_ascii=False, indent=2).encode("utf-8")
-st.sidebar.download_button("Descarregar cópia JSON", data=json_bytes, file_name="financas_casal.json", mime="application/json", use_container_width=True)
+st.sidebar.subheader("Importação de histórico e novos movimentos")
+if ARQUIVO_JSON_LOCAL.exists() and st.session_state.nome_json == ARQUIVO_JSON_LOCAL.name:
+    st.sidebar.success(f"Histórico ativo: {st.session_state.nome_json}")
+else:
+    st.sidebar.info("Sem histórico local carregado")
+pagina_importacao = "Importar histórico e novos movimentos"
+st.sidebar.button(
+    "Abrir importação",
+    type="primary" if st.session_state.pagina_atual == pagina_importacao else "secondary",
+    use_container_width=True,
+    on_click=abrir_importacao,
+)
+st.sidebar.divider()
+st.sidebar.subheader("Navegação")
+for pagina_navegacao in ("Resumo mensal", "Movimentos e regras", "Categorias e descrições"):
+    st.sidebar.button(
+        pagina_navegacao,
+        type="primary" if st.session_state.pagina_atual == pagina_navegacao else "secondary",
+        use_container_width=True,
+        key=f"navegar_{normalizar_nome(pagina_navegacao)}",
+        on_click=navegar_para,
+        args=(pagina_navegacao,),
+    )
+pagina = st.session_state.pagina_atual
 
-pagina = st.sidebar.radio("Navegação", ["Resumo mensal", "Importar movimentos", "Movimentos", "Regras automáticas", "Categorias e descrições"])
+if pagina == "Importar histórico e novos movimentos":
+    st.header("Importar histórico e novos movimentos")
+    if ARQUIVO_JSON_LOCAL.exists() and st.session_state.nome_json == ARQUIVO_JSON_LOCAL.name:
+        st.success(f"Histórico pronto a usar: {ARQUIVO_JSON_LOCAL.name}. Os novos movimentos serão acrescentados a este histórico.")
+    elif ARQUIVO_JSON_LOCAL.exists():
+        st.warning(f"Foi encontrado {ARQUIVO_JSON_LOCAL.name}, mas não foi possível carregá-lo. Podes selecionar um JSON válido abaixo.")
+    else:
+        st.info("Ainda não existe histórico local. Importa um JSON ou começa por importar movimentos bancários.")
 
-if pagina == "Importar movimentos":
-    st.header("Importar movimentos bancários")
-    st.write("Carrega um CSV ou XML exportado pelo banco. Funciona mesmo sem teres carregado um JSON.")
-    conta = st.text_input("Nome da conta", value="Conta conjunta")
-    ficheiro = st.file_uploader("Escolhe o ficheiro", type=["csv", "xml", "txt"])
-    if ficheiro is not None:
-        st.info(f"Ficheiro selecionado: {ficheiro.name}")
-        if st.button("Importar ficheiro", type="primary"):
+    st.subheader("Importar histórico JSON")
+    json_upload = st.file_uploader("Carregar ou substituir histórico JSON", type=["json"], key="json_upload")
+    if json_upload is not None:
+        conteudo_json = json_upload.getvalue()
+        hash_json = hashlib.sha256(conteudo_json).hexdigest()
+        if hash_json != st.session_state.json_upload_hash:
             try:
-                conteudo = ficheiro.getvalue()
-                registos = ler_xml(conteudo) if ficheiro.name.lower().endswith(".xml") else ler_csv(conteudo)
-                if not registos:
-                    st.warning("Não encontrei linhas de movimentos no ficheiro.")
+                candidato = json.loads(conteudo_json.decode("utf-8-sig"))
+                if not isinstance(candidato, dict) or not all(k in candidato for k in ("movimentos", "regras", "descricoes")):
+                    raise ValueError("O JSON não tem a estrutura esperada da aplicação.")
+                base = estado_novo()
+                base.update(candidato)
+                base["movimentos"] = list(base.get("movimentos", []))
+                base["regras"] = list(base.get("regras", []))
+                categorias_guardadas = candidato.get("categorias", CATEGORIAS)
+                base["categorias"] = list(dict.fromkeys(c for c in categorias_guardadas if isinstance(c, str) and c.strip())) or CATEGORIAS.copy()
+                base["descricoes"] = list(base.get("descricoes", []))
+                base["proximo_id_movimento"] = max([int(m.get("id", 0)) for m in base["movimentos"]] + [0]) + 1
+                base["proximo_id_regra"] = max([int(r.get("id", 0)) for r in base["regras"]] + [0]) + 1
+                st.session_state.dados = base
+                st.session_state.nome_json = json_upload.name
+                if guardar_json_local():
+                    st.session_state.json_upload_hash = hash_json
+                    st.session_state.json_upload_status = f"Histórico carregado e guardado: {json_upload.name}"
                 else:
-                    inseridos, ignorados = importar_movimentos(registos, ficheiro.name, conta)
-                    st.success(f"Importação concluída: {inseridos} movimentos novos; {ignorados} possíveis duplicados ignorados.")
-                    st.caption("Os duplicados são comparados apenas com os movimentos presentes nesta sessão/histórico carregado.")
+                    st.session_state.json_upload_status = "O histórico foi carregado nesta sessão, mas não foi possível guardá-lo localmente."
             except Exception as exc:
-                st.error(f"Não foi possível importar o ficheiro: {exc}")
-                st.caption("O formato exportado pelo banco pode precisar de um ajuste específico no leitor.")
+                st.session_state.json_upload_status = f"Não foi possível carregar o JSON: {exc}"
+        if st.session_state.get("json_upload_status", "").startswith("Histórico carregado"):
+            st.success(st.session_state.json_upload_status)
+        elif st.session_state.get("json_upload_status"):
+            st.error(st.session_state.json_upload_status)
 
-elif pagina == "Movimentos":
+    st.download_button("Descarregar histórico JSON", data=json.dumps(st.session_state.dados, ensure_ascii=False, indent=2).encode("utf-8"), file_name="financas_casal.json", mime="application/json")
+    st.divider()
+    st.subheader("Importar Novos Movimentos")
+    ficheiro = st.file_uploader("Seleciona um extrato CSV ou XML", type=["csv", "xml", "txt"], key="extrato_upload")
+    if ficheiro is not None:
+        conteudo_extrato = ficheiro.getvalue()
+        hash_extrato = hashlib.sha256(conteudo_extrato).hexdigest()
+        if hash_extrato != st.session_state.extrato_upload_hash:
+            try:
+                registos = ler_xml(conteudo_extrato) if ficheiro.name.lower().endswith(".xml") else ler_csv(conteudo_extrato)
+                if not registos:
+                    st.session_state.extrato_upload_status = "Não encontrei linhas de movimentos no ficheiro."
+                else:
+                    inseridos, ignorados = importar_movimentos(registos, ficheiro.name, "Conta conjunta")
+                    st.session_state.extrato_upload_status = f"{ficheiro.name}: {inseridos} movimentos novos; {ignorados} duplicados ignorados. Histórico guardado localmente."
+                st.session_state.extrato_upload_hash = hash_extrato
+            except Exception as exc:
+                st.session_state.extrato_upload_status = f"Não foi possível importar o ficheiro: {exc}"
+                st.session_state.extrato_upload_hash = hash_extrato
+        if st.session_state.get("extrato_upload_status", "").startswith("Não foi possível") or st.session_state.get("extrato_upload_status", "").startswith("Não encontrei"):
+            st.warning(st.session_state.extrato_upload_status)
+        elif st.session_state.get("extrato_upload_status"):
+            st.success(st.session_state.extrato_upload_status)
+
+elif pagina == "Movimentos e regras":
     st.header("Movimentos bancários")
     df = carregar_movimentos()
     if df.empty:
@@ -336,84 +494,121 @@ elif pagina == "Movimentos":
         if categoria_filtro != "Todas": filtrado = filtrado[filtrado["categoria"] == categoria_filtro]
         if pesquisa: filtrado = filtrado[filtrado["descricao_original"].str.contains(pesquisa, case=False, na=False)]
         if estado_filtro != "Todos": filtrado = filtrado[filtrado["estado"] == estado_filtro]
-        st.dataframe(filtrado[["id", "data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado"]], use_container_width=True, hide_index=True)
+        movimentos_tabela = filtrado[["id", "data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado"]]
+        movimentos_tabela = movimentos_tabela.rename(columns={"id": "ID", "data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
+        st.dataframe(movimentos_tabela, use_container_width=True, hide_index=True)
         st.subheader("Editar classificação de um movimento")
         ids = filtrado["id"].tolist()
         if ids:
             escolha_id = st.selectbox("Escolhe o movimento", ids, format_func=lambda x: f"#{x} | {filtrado.loc[filtrado['id'] == x, 'data_movimento'].iloc[0]} | {filtrado.loc[filtrado['id'] == x, 'descricao_original'].iloc[0]}")
             movimento = df.loc[df["id"] == escolha_id].iloc[0]
-            with st.form("editar_movimento"):
-                categoria_nova = st.selectbox("Categoria principal", CATEGORIAS, index=CATEGORIAS.index(movimento["categoria"]) if movimento["categoria"] in CATEGORIAS else CATEGORIAS.index("Outros"))
-                existentes = descricoes_por_categoria(categoria_nova)
-                atual = movimento["descricao_personalizada"]
-                opcoes = existentes.copy()
-                if atual and atual not in opcoes: opcoes.insert(0, atual)
-                descricao_nova = st.selectbox("Descrição personalizada", opcoes if opcoes else ["Por classificar"])
-                descricao_manual = st.text_input("Ou escreve uma nova descrição", value="")
-                criar_regra = st.checkbox("Criar/atualizar regra automática para movimentos futuros")
-                texto_regra = st.text_input("Texto que a descrição bancária deve conter", value=movimento["descricao_original"])
-                guardar = st.form_submit_button("Guardar classificação")
-                if guardar:
-                    aplicar_classificacao(escolha_id, categoria_nova, descricao_manual.strip() or descricao_nova, criar_regra, texto_regra)
-                    st.success("Classificação guardada e salva no JSON local.")
-                    st.rerun()
-
-elif pagina == "Regras automáticas":
-    st.header("Regras automáticas")
-    st.write("As regras procuram um texto dentro da descrição original. As mais específicas são aplicadas primeiro.")
-    with st.form("nova_regra"):
-        texto = st.text_input("Se a descrição bancária contiver")
-        categoria = st.selectbox("Categoria principal", CATEGORIAS)
-        descricoes = descricoes_por_categoria(categoria)
-        descricao = st.selectbox("Descrição personalizada", descricoes if descricoes else ["Por classificar"])
-        descricao_nova = st.text_input("Ou cria uma nova descrição")
-        ativa = st.checkbox("Regra ativa", value=True)
-        submeter = st.form_submit_button("Guardar regra")
-        if submeter:
-            nome_desc = descricao_nova.strip() or descricao
-            if not texto.strip():
-                st.error("Indica o texto a procurar na descrição bancária.")
-            else:
-                guardar_descricao(categoria, nome_desc)
-                existente = next((r for r in st.session_state.dados["regras"] if r["texto_contem"].casefold() == texto.strip().casefold()), None)
-                if existente: existente.update({"categoria": categoria, "descricao_personalizada": nome_desc, "ativa": ativa})
-                else:
-                    st.session_state.dados["regras"].append({"id": st.session_state.dados["proximo_id_regra"], "texto_contem": texto.strip(), "categoria": categoria, "descricao_personalizada": nome_desc, "ativa": ativa})
-                    st.session_state.dados["proximo_id_regra"] += 1
-                guardar_json_local()
-                st.success("Regra guardada. O JSON local foi atualizado.")
+            categorias = categorias_atuais()
+            categoria_nova = st.selectbox("Categoria principal", categorias, index=categorias.index(movimento["categoria"]) if movimento["categoria"] in categorias else 0, key=f"categoria_movimento_edicao_{escolha_id}")
+            opcoes = descricoes_por_categoria(categoria_nova) or ["Por classificar"]
+            descricao_nova = st.selectbox("Descrição personalizada", opcoes, key=f"descricao_movimento_edicao_{escolha_id}")
+            criar_regra = st.checkbox("Criar/atualizar regra automática para movimentos futuros", key=f"criar_regra_movimento_{escolha_id}")
+            if st.button("Guardar classificação", key=f"guardar_classificacao_{escolha_id}"):
+                descricao_original = filtrado.loc[filtrado["id"] == escolha_id, "descricao_original"].iloc[0]
+                aplicar_classificacao(escolha_id, categoria_nova, descricao_nova, criar_regra, descricao_original)
+                st.success("Classificação guardada no JSON local.")
                 st.rerun()
+
+    st.divider()
+    st.subheader("Regras automáticas")
+    st.caption("Alterar ou eliminar uma regra atualiza também os movimentos classificados automaticamente.")
     regras = sorted(st.session_state.dados["regras"], key=lambda r: (len(r.get("texto_contem", "")), r.get("texto_contem", "").lower()), reverse=True)
     if regras:
-        st.subheader("Regras existentes")
-        st.dataframe(pd.DataFrame(regras)[["id", "texto_contem", "categoria", "descricao_personalizada", "ativa"]], use_container_width=True, hide_index=True)
-        apagar_id = st.selectbox("ID da regra a eliminar", [None] + [r["id"] for r in regras], format_func=lambda x: "Selecionar..." if x is None else str(x))
-        if apagar_id is not None and st.button("Eliminar regra selecionada"):
-            st.session_state.dados["regras"] = [r for r in st.session_state.dados["regras"] if r["id"] != apagar_id]
-            guardar_json_local()
-            st.success("Regra eliminada.")
-            st.rerun()
+        for regra in regras:
+            with st.expander(f"{regra['texto_contem']}  ·  {regra['categoria']} / {regra['descricao_personalizada']}"):
+                texto_regra = st.text_input("Descrição bancária contém", value=regra.get("texto_contem", ""), key=f"texto_regra_{regra['id']}")
+                categorias = categorias_atuais()
+                categoria_atual = regra.get("categoria")
+                categoria_regra = st.selectbox("Categoria", categorias, index=categorias.index(categoria_atual) if categoria_atual in categorias else 0, key=f"categoria_regra_{regra['id']}")
+                descricoes_regra = descricoes_por_categoria(categoria_regra) or ["Por classificar"]
+                descricao_atual = regra.get("descricao_personalizada", "Por classificar")
+                descricao_padrao = descricoes_regra.index(descricao_atual) if descricao_atual in descricoes_regra else 0
+                descricao_regra = st.selectbox("Descrição", descricoes_regra, index=descricao_padrao, key=f"descricao_regra_{regra['id']}")
+                ativa_regra = st.checkbox("Regra ativa", value=regra.get("ativa", True), key=f"ativa_regra_{regra['id']}")
+                if st.button("Guardar regra", key=f"guardar_regra_{regra['id']}"):
+                    if not texto_regra.strip():
+                        st.error("O texto da regra não pode ficar vazio.")
+                    else:
+                        texto_anterior = regra.get("texto_contem", "")
+                        regra.update({"texto_contem": texto_regra.strip(), "categoria": categoria_regra, "descricao_personalizada": descricao_regra, "ativa": ativa_regra})
+                        reclassificar_movimentos_automaticos([texto_anterior, texto_regra.strip()])
+                        guardar_json_local()
+                        st.success("Regra atualizada e movimentos automáticos revistos.")
+                        st.rerun()
+                if st.button("Eliminar regra", key=f"eliminar_regra_{regra['id']}"):
+                    texto_removido = regra.get("texto_contem", "")
+                    st.session_state.dados["regras"] = [r for r in st.session_state.dados["regras"] if r["id"] != regra["id"]]
+                    reclassificar_movimentos_automaticos([texto_removido])
+                    guardar_json_local()
+                    st.success("Regra eliminada e movimentos automáticos atualizados.")
+                    st.rerun()
     else:
-        st.info("Ainda não criaste regras.")
+        st.info("Ainda não existem regras automáticas. Cria uma ao classificar um movimento e marcar a opção correspondente.")
 
 elif pagina == "Categorias e descrições":
     st.header("Categorias e descrições")
-    st.write("As categorias principais são predefinidas. Podes acrescentar descrições reutilizáveis.")
-    categoria = st.selectbox("Categoria", CATEGORIAS)
-    with st.form("nova_descricao"):
-        nome = st.text_input("Nova descrição personalizada", placeholder="Ex.: Farmácia")
-        submeter = st.form_submit_button("Adicionar descrição")
-        if submeter:
-            if not nome.strip(): st.error("Escreve uma descrição.")
-            else:
-                guardar_descricao(categoria, nome)
-                st.success("Descrição adicionada e guardada no JSON local.")
+    st.subheader("Categorias")
+    with st.form("nova_categoria"):
+        nova_categoria = st.text_input("Nova categoria", placeholder="Ex.: Educação")
+        adicionar_cat = st.form_submit_button("＋ Adicionar categoria", key="adicionar_categoria")
+        if adicionar_cat:
+            if adicionar_categoria(nova_categoria):
+                st.success("Categoria adicionada e guardada.")
                 st.rerun()
-    st.subheader("Descrições existentes")
-    for cat in CATEGORIAS:
-        descs = descricoes_por_categoria(cat)
-        if descs:
-            with st.expander(cat): st.write(", ".join(descs))
+            st.error("Escreve uma categoria nova, ainda não existente.")
+
+    for categoria in categorias_atuais():
+        cabecalho, apagar, _ = st.columns([0.26, 0.06, 0.68])
+        cabecalho.subheader(categoria)
+        if apagar.button("×", key=f"remover_categoria_{categoria}", help=f"Remover categoria {categoria}"):
+            remover_categoria(categoria)
+            st.rerun()
+        descricoes = descricoes_por_categoria(categoria)
+        botoes_descricoes = [(descricao, indice) for indice, descricao in enumerate(descricoes)] + [(None, None)]
+        for inicio in range(0, len(botoes_descricoes), 4):
+            elementos_linha = botoes_descricoes[inicio:inicio + 4]
+            colunas_descricoes = st.columns(len(elementos_linha))
+            for coluna, (descricao, _) in zip(colunas_descricoes, elementos_linha):
+                if descricao is None:
+                    coluna.button(
+                        "＋",
+                        key=f"adicionar_descricao_{normalizar_nome(categoria)}",
+                        help=f"Adicionar descrição a {categoria}",
+                        use_container_width=True,
+                        on_click=alternar_adicao_descricao,
+                        args=(categoria,),
+                    )
+                elif coluna.button(
+                    f"{descricao}  ×",
+                    key=f"remover_descricao_{normalizar_nome(categoria)}_{normalizar_nome(descricao)}",
+                    help=f"Remover {descricao}",
+                    use_container_width=True,
+                ):
+                    remover_descricao(categoria, descricao)
+                    st.rerun()
+        if st.session_state.categoria_descricao_aberta == categoria:
+            with st.form(f"nova_descricao_{normalizar_nome(categoria)}"):
+                col_nome, col_adicionar, col_cancelar = st.columns([6, 1, 1])
+                nome = col_nome.text_input("Nome da descrição", placeholder="Ex.: Farmácia")
+                adicionar_desc = col_adicionar.form_submit_button("＋", help="Adicionar descrição")
+                cancelar_desc = col_cancelar.form_submit_button("×", help="Cancelar")
+                if adicionar_desc:
+                    if not nome.strip():
+                        st.error("Escreve uma descrição.")
+                    elif any(item.casefold() == nome.strip().casefold() for item in descricoes_por_categoria(categoria)):
+                        st.error("Essa descrição já existe nesta categoria.")
+                    else:
+                        guardar_descricao(categoria, nome)
+                        st.session_state.categoria_descricao_aberta = None
+                        guardar_json_local()
+                        st.rerun()
+                if cancelar_desc:
+                    st.session_state.categoria_descricao_aberta = None
+                    st.rerun()
 
 else:
     st.header("Resumo mensal")
@@ -439,13 +634,15 @@ else:
             c1.metric("Rendimentos", fmt(rendimentos)); c2.metric("Despesas classificadas", fmt(despesas)); c3.metric("Transferências / poupanças", fmt(transferencias)); c4.metric("Variação líquida dos movimentos", fmt(variacao_saldo))
             st.subheader("Totais por categoria")
             resumo_cat = mensal.groupby("categoria", dropna=False)["montante"].sum().reset_index()
-            resumo_cat["total de saídas (positivo)"] = resumo_cat["montante"].apply(lambda x: -x if x < 0 else 0)
-            st.dataframe(resumo_cat[["categoria", "montante", "total de saídas (positivo)"]], use_container_width=True, hide_index=True)
+            resumo_cat["Total de saídas (positivo)"] = resumo_cat["montante"].apply(lambda x: -x if x < 0 else 0)
+            resumo_cat = resumo_cat.rename(columns={"categoria": "Categoria", "montante": "Montante"})
+            st.dataframe(resumo_cat[["Categoria", "Montante", "Total de saídas (positivo)"]], use_container_width=True, hide_index=True)
             st.subheader("Totais por descrição")
-            st.dataframe(mensal.groupby(["categoria", "descricao_personalizada"], dropna=False)["montante"].sum().reset_index(), use_container_width=True, hide_index=True)
+            resumo_desc = mensal.groupby(["categoria", "descricao_personalizada"], dropna=False)["montante"].sum().reset_index()
+            resumo_desc = resumo_desc.rename(columns={"categoria": "Categoria", "descricao_personalizada": "Descrição", "montante": "Montante"})
+            st.dataframe(resumo_desc, use_container_width=True, hide_index=True)
             st.subheader("Movimentos do mês")
-            st.dataframe(mensal[["data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado"]].sort_values("data_movimento", ascending=False), use_container_width=True, hide_index=True)
+            movimentos_mes = mensal[["data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado"]].sort_values("data_movimento", ascending=False)
+            movimentos_mes = movimentos_mes.rename(columns={"data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
+            st.dataframe(movimentos_mes, use_container_width=True, hide_index=True)
 
-st.sidebar.divider()
-st.sidebar.caption("Os dados are guardados localmente em JSON na pasta da app, para poderes continuar em sessões futuras sem carregares o ficheiro manualmente.")
-st.sidebar.caption("Podes também descarregar uma cópia em JSON a qualquer momento.")
