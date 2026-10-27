@@ -670,6 +670,7 @@ elif pagina == "Categorias e descrições":
                         key=f"remover_descricao_{normalizar_nome(categoria)}_{normalizar_nome(descricao)}",
                         help=f"Remover {descricao}",
                         width="content",
+                        wrap=False,
                     ):
                         remover_descricao(categoria, descricao)
                         st.rerun()
