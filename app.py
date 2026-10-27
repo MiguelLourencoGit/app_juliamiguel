@@ -11,7 +11,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-ARQUIVO_JSON_LOCAL = Path(__file__).resolve().parent / "financas_casal.json"
+PASTA_DADOS = Path(__file__).resolve().parent
+ARQUIVO_JSON_LOCAL = PASTA_DADOS / "historico_movimentos.json"
+ARQUIVO_JSON_LEGADO = PASTA_DADOS / "financas_casal.json"
 
 st.set_page_config(page_title="Finanças do casal", page_icon="💶", layout="wide")
 st.markdown(
@@ -33,9 +35,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.title("💶 Finanças do casal")
-st.caption("Importa movimentos bancários, classifica-os e acompanha as despesas ao longo do tempo.")
-
 CATEGORIAS = ["Rendimentos", "Casa", "Despesas do dia a dia", "Despesas pessoais", "Poupanças", "Transferências", "Outros"]
 DESCRICOES_INICIAIS = [
     ("Rendimentos", "Ordenado Miguel"), ("Rendimentos", "Ordenado Júlia"), ("Rendimentos", "Outros rendimentos"), ("Rendimentos", "Reembolsos"),
@@ -57,11 +56,22 @@ def estado_novo():
     }
 
 
+def localizar_json_local():
+    ficheiros_datados = sorted(
+        (caminho for caminho in PASTA_DADOS.glob("historico_movimentos*.json") if caminho != ARQUIVO_JSON_LOCAL),
+        key=lambda caminho: caminho.stat().st_mtime,
+        reverse=True,
+    )
+    candidatos = [ARQUIVO_JSON_LOCAL, *ficheiros_datados, ARQUIVO_JSON_LEGADO]
+    return next((caminho for caminho in candidatos if caminho.is_file()), None)
+
+
 def carregar_json_local():
-    if not ARQUIVO_JSON_LOCAL.exists():
+    caminho_json = localizar_json_local()
+    if caminho_json is None:
         return estado_novo(), "Sessão nova (sem histórico carregado)"
     try:
-        with ARQUIVO_JSON_LOCAL.open("r", encoding="utf-8-sig") as ficheiro:
+        with caminho_json.open("r", encoding="utf-8-sig") as ficheiro:
             dados = json.load(ficheiro)
         if not isinstance(dados, dict) or not all(k in dados for k in ("movimentos", "regras", "descricoes")):
             raise ValueError("JSON sem estrutura válida.")
@@ -74,7 +84,7 @@ def carregar_json_local():
         base["descricoes"] = list(base.get("descricoes", []))
         base["proximo_id_movimento"] = max([int(m.get("id", 0)) for m in base["movimentos"]] + [0]) + 1
         base["proximo_id_regra"] = max([int(r.get("id", 0)) for r in base["regras"]] + [0]) + 1
-        return base, ARQUIVO_JSON_LOCAL.name
+        return base, caminho_json.name
     except Exception:
         return estado_novo(), "Sessão nova (sem histórico carregado)"
 
@@ -390,7 +400,7 @@ def aplicar_classificacao(movimento_id, categoria, descricao_personalizada, cria
     guardar_json_local()
 
 st.sidebar.subheader("Importação de histórico e novos movimentos")
-if ARQUIVO_JSON_LOCAL.exists() and st.session_state.nome_json == ARQUIVO_JSON_LOCAL.name:
+if st.session_state.nome_json != "Sessão nova (sem histórico carregado)":
     st.sidebar.success(f"Histórico ativo: {st.session_state.nome_json}")
 else:
     st.sidebar.info("Sem histórico local carregado")
@@ -415,14 +425,6 @@ for pagina_navegacao in ("Resumo mensal", "Movimentos e regras", "Categorias e d
 pagina = st.session_state.pagina_atual
 
 if pagina == "Importar histórico e novos movimentos":
-    st.header("Importar histórico e novos movimentos")
-    if ARQUIVO_JSON_LOCAL.exists() and st.session_state.nome_json == ARQUIVO_JSON_LOCAL.name:
-        st.success(f"Histórico pronto a usar: {ARQUIVO_JSON_LOCAL.name}. Os novos movimentos serão acrescentados a este histórico.")
-    elif ARQUIVO_JSON_LOCAL.exists():
-        st.warning(f"Foi encontrado {ARQUIVO_JSON_LOCAL.name}, mas não foi possível carregá-lo. Podes selecionar um JSON válido abaixo.")
-    else:
-        st.info("Ainda não existe histórico local. Importa um JSON ou começa por importar movimentos bancários.")
-
     st.subheader("Importar histórico JSON")
     json_upload = st.file_uploader("Carregar ou substituir histórico JSON", type=["json"], key="json_upload")
     if json_upload is not None:
@@ -455,8 +457,13 @@ if pagina == "Importar histórico e novos movimentos":
             st.success(st.session_state.json_upload_status)
         elif st.session_state.get("json_upload_status"):
             st.error(st.session_state.json_upload_status)
+    elif st.session_state.nome_json != "Sessão nova (sem histórico carregado)":
+        st.success(f"Histórico pronto a usar: {st.session_state.nome_json}. Os novos movimentos serão acrescentados a este histórico.")
+    elif localizar_json_local() is not None:
+        st.warning(f"Foi encontrado {localizar_json_local().name}, mas não foi possível carregá-lo. Podes selecionar um JSON válido acima.")
 
-    st.download_button("Descarregar histórico JSON", data=json.dumps(st.session_state.dados, ensure_ascii=False, indent=2).encode("utf-8"), file_name="financas_casal.json", mime="application/json")
+    nome_download = f"historico_movimentos_{datetime.now().strftime('%d_%m_%Y')}.json"
+    st.download_button("Descarregar histórico JSON", data=json.dumps(st.session_state.dados, ensure_ascii=False, indent=2).encode("utf-8"), file_name=nome_download, mime="application/json")
     st.divider()
     st.subheader("Importar Novos Movimentos")
     ficheiro = st.file_uploader("Seleciona um extrato CSV ou XML", type=["csv", "xml", "txt"], key="extrato_upload")
@@ -611,6 +618,7 @@ elif pagina == "Categorias e descrições":
                     st.rerun()
 
 else:
+    st.title("💶 Finanças do casal")
     st.header("Resumo mensal")
     df = carregar_movimentos()
     if df.empty:
