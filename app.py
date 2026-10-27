@@ -362,7 +362,7 @@ def importar_movimentos(registos, origem, conta):
             continue
         categoria, desc_personalizada, estado = classificar(descricao)
         regra = regra_correspondente(descricao)
-        movimento = {"id": dados["proximo_id_movimento"], "data_movimento": data, "data_valor": data_valor, "descricao_original": str(descricao).strip(), "montante": montante, "saldo": saldo, "conta": conta_registo, "categoria": categoria, "descricao_personalizada": desc_personalizada, "estado": estado, "regra_id": regra.get("id") if regra else None, "origem_ficheiro": origem, "fingerprint": fp}
+        movimento = {"id": dados["proximo_id_movimento"], "data_movimento": data, "data_valor": data_valor, "descricao_original": str(descricao).strip(), "montante": montante, "saldo": saldo, "conta": conta_registo, "categoria": categoria, "descricao_personalizada": desc_personalizada, "estado": estado, "regra_id": regra.get("id") if regra else None, "excluido": False, "origem_ficheiro": origem, "fingerprint": fp}
         dados["movimentos"].append(movimento)
         dados["proximo_id_movimento"] += 1
         fingerprints.add(fp)
@@ -372,8 +372,20 @@ def importar_movimentos(registos, origem, conta):
 
 
 def carregar_movimentos():
-    colunas = ["id", "data_movimento", "data_valor", "descricao_original", "montante", "saldo", "conta", "categoria", "descricao_personalizada", "estado", "origem_ficheiro", "fingerprint"]
-    return pd.DataFrame(st.session_state.dados["movimentos"], columns=colunas).sort_values(["data_movimento", "id"], ascending=[False, False], na_position="last") if st.session_state.dados["movimentos"] else pd.DataFrame(columns=colunas)
+    colunas = ["id", "data_movimento", "data_valor", "descricao_original", "montante", "saldo", "conta", "categoria", "descricao_personalizada", "estado", "excluido", "origem_ficheiro", "fingerprint"]
+    df = pd.DataFrame(st.session_state.dados["movimentos"], columns=colunas)
+    if df.empty:
+        return df
+    df["excluido"] = df["excluido"].astype("boolean").fillna(False).astype(bool)
+    return df.sort_values(["data_movimento", "id"], ascending=[False, False], na_position="last")
+
+
+def alternar_exclusao_movimento(movimento_id):
+    for movimento in st.session_state.dados["movimentos"]:
+        if movimento.get("id") == movimento_id:
+            movimento["excluido"] = not bool(movimento.get("excluido", False))
+            guardar_json_local()
+            return
 
 
 def criar_grafico_barras(resumo, campo_categoria, orientacao, escala, selecao=None):
@@ -569,14 +581,27 @@ elif pagina == "Movimentos e regras":
         if categoria_filtro != "Todas": filtrado = filtrado[filtrado["categoria"] == categoria_filtro]
         if pesquisa: filtrado = filtrado[filtrado["descricao_original"].str.contains(pesquisa, case=False, na=False)]
         if estado_filtro != "Todos": filtrado = filtrado[filtrado["estado"] == estado_filtro]
-        movimentos_tabela = filtrado[["id", "data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado"]]
-        movimentos_tabela = movimentos_tabela.rename(columns={"id": "ID", "data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
-        st.dataframe(movimentos_tabela, use_container_width=True, hide_index=True)
+        movimentos_tabela = filtrado[["id", "data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado", "excluido"]].copy()
+        movimentos_tabela["Contabilização"] = movimentos_tabela["excluido"].map({True: "Excluído", False: "Incluído"})
+        movimentos_tabela = movimentos_tabela.drop(columns="excluido").rename(columns={"id": "ID", "data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
+        tabela_formatada = movimentos_tabela.style.apply(
+            lambda linha: ["background-color: #8b1e1e; color: white;" if linha["Contabilização"] == "Excluído" else "" for _ in linha],
+            axis=1,
+        )
+        st.dataframe(tabela_formatada, use_container_width=True, hide_index=True)
         st.subheader("Editar classificação de um movimento")
         ids = filtrado["id"].tolist()
         if ids:
             escolha_id = st.selectbox("Escolhe o movimento", ids, format_func=lambda x: f"#{x} | {filtrado.loc[filtrado['id'] == x, 'data_movimento'].iloc[0]} | {filtrado.loc[filtrado['id'] == x, 'descricao_original'].iloc[0]}")
             movimento = df.loc[df["id"] == escolha_id].iloc[0]
+            if movimento.get("excluido", False):
+                st.error("Este movimento está excluído do resumo mensal.")
+                if st.button("Restaurar movimento", key=f"restaurar_movimento_{escolha_id}"):
+                    alternar_exclusao_movimento(escolha_id)
+                    st.rerun()
+            elif st.button("Excluir movimento", key=f"excluir_movimento_{escolha_id}"):
+                alternar_exclusao_movimento(escolha_id)
+                st.rerun()
             categorias = categorias_atuais()
             categoria_nova = st.selectbox("Categoria principal", categorias, index=categorias.index(movimento["categoria"]) if movimento["categoria"] in categorias else 0, key=f"categoria_movimento_edicao_{escolha_id}")
             opcoes = descricoes_por_categoria(categoria_nova) or ["Por classificar"]
@@ -683,8 +708,10 @@ else:
     st.title("💶 Finanças do casal")
     st.header("Resumo mensal")
     df = carregar_movimentos()
+    if not df.empty:
+        df = df.loc[~df["excluido"]].copy()
     if df.empty:
-        st.info("Ainda não existem movimentos. Vai a 'Importar movimentos' para carregar o primeiro extrato.")
+        st.info("Ainda não existem movimentos por contabilizar. Importa movimentos ou restaura os que foram excluídos.")
     else:
         df["data_movimento"] = pd.to_datetime(df["data_movimento"], errors="coerce")
         df = df[df["data_movimento"].notna()].copy()
