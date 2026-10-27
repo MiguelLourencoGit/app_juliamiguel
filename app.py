@@ -558,7 +558,6 @@ elif pagina == "Movimentos e regras":
 
 elif pagina == "Categorias e descrições":
     st.header("Categorias e descrições")
-    st.subheader("Categorias")
     with st.form("nova_categoria"):
         nova_categoria = st.text_input("Nova categoria", placeholder="Ex.: Educação")
         adicionar_cat = st.form_submit_button("＋ Adicionar categoria", key="adicionar_categoria")
@@ -569,53 +568,48 @@ elif pagina == "Categorias e descrições":
             st.error("Escreve uma categoria nova, ainda não existente.")
 
     for categoria in categorias_atuais():
-        cabecalho, apagar, _ = st.columns([0.26, 0.06, 0.68])
-        cabecalho.subheader(categoria)
-        if apagar.button("×", key=f"remover_categoria_{categoria}", help=f"Remover categoria {categoria}"):
+        coluna_categoria, coluna_remover = st.columns([0.92, 0.08])
+        with coluna_categoria.expander(categoria, expanded=st.session_state.categoria_descricao_aberta == categoria):
+            with st.container(horizontal=True, wrap=True, gap="small", key=f"descricoes_{normalizar_nome(categoria)}"):
+                for descricao in descricoes_por_categoria(categoria):
+                    if st.button(
+                        f"{descricao}  ×",
+                        key=f"remover_descricao_{normalizar_nome(categoria)}_{normalizar_nome(descricao)}",
+                        help=f"Remover {descricao}",
+                        width="content",
+                    ):
+                        remover_descricao(categoria, descricao)
+                        st.rerun()
+                st.button(
+                    "＋",
+                    key=f"adicionar_descricao_{normalizar_nome(categoria)}",
+                    help=f"Adicionar descrição a {categoria}",
+                    width="content",
+                    on_click=alternar_adicao_descricao,
+                    args=(categoria,),
+                )
+            if st.session_state.categoria_descricao_aberta == categoria:
+                with st.form(f"nova_descricao_{normalizar_nome(categoria)}"):
+                    col_nome, col_adicionar, col_cancelar = st.columns([6, 1, 1])
+                    nome = col_nome.text_input("Nome da descrição", placeholder="Ex.: Farmácia")
+                    adicionar_desc = col_adicionar.form_submit_button("＋", help="Adicionar descrição")
+                    cancelar_desc = col_cancelar.form_submit_button("×", help="Cancelar")
+                    if adicionar_desc:
+                        if not nome.strip():
+                            st.error("Escreve uma descrição.")
+                        elif any(item.casefold() == nome.strip().casefold() for item in descricoes_por_categoria(categoria)):
+                            st.error("Essa descrição já existe nesta categoria.")
+                        else:
+                            guardar_descricao(categoria, nome)
+                            st.session_state.categoria_descricao_aberta = None
+                            guardar_json_local()
+                            st.rerun()
+                    if cancelar_desc:
+                        st.session_state.categoria_descricao_aberta = None
+                        st.rerun()
+        if coluna_remover.button("×", key=f"remover_categoria_{categoria}", help=f"Remover categoria {categoria}", width="content"):
             remover_categoria(categoria)
             st.rerun()
-        descricoes = descricoes_por_categoria(categoria)
-        botoes_descricoes = [(descricao, indice) for indice, descricao in enumerate(descricoes)] + [(None, None)]
-        for inicio in range(0, len(botoes_descricoes), 4):
-            elementos_linha = botoes_descricoes[inicio:inicio + 4]
-            colunas_descricoes = st.columns(len(elementos_linha))
-            for coluna, (descricao, _) in zip(colunas_descricoes, elementos_linha):
-                if descricao is None:
-                    coluna.button(
-                        "＋",
-                        key=f"adicionar_descricao_{normalizar_nome(categoria)}",
-                        help=f"Adicionar descrição a {categoria}",
-                        use_container_width=True,
-                        on_click=alternar_adicao_descricao,
-                        args=(categoria,),
-                    )
-                elif coluna.button(
-                    f"{descricao}  ×",
-                    key=f"remover_descricao_{normalizar_nome(categoria)}_{normalizar_nome(descricao)}",
-                    help=f"Remover {descricao}",
-                    use_container_width=True,
-                ):
-                    remover_descricao(categoria, descricao)
-                    st.rerun()
-        if st.session_state.categoria_descricao_aberta == categoria:
-            with st.form(f"nova_descricao_{normalizar_nome(categoria)}"):
-                col_nome, col_adicionar, col_cancelar = st.columns([6, 1, 1])
-                nome = col_nome.text_input("Nome da descrição", placeholder="Ex.: Farmácia")
-                adicionar_desc = col_adicionar.form_submit_button("＋", help="Adicionar descrição")
-                cancelar_desc = col_cancelar.form_submit_button("×", help="Cancelar")
-                if adicionar_desc:
-                    if not nome.strip():
-                        st.error("Escreve uma descrição.")
-                    elif any(item.casefold() == nome.strip().casefold() for item in descricoes_por_categoria(categoria)):
-                        st.error("Essa descrição já existe nesta categoria.")
-                    else:
-                        guardar_descricao(categoria, nome)
-                        st.session_state.categoria_descricao_aberta = None
-                        guardar_json_local()
-                        st.rerun()
-                if cancelar_desc:
-                    st.session_state.categoria_descricao_aberta = None
-                    st.rerun()
 
 else:
     st.title("💶 Finanças do casal")
