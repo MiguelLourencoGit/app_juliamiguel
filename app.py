@@ -36,11 +36,11 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-CATEGORIAS = ["Rendimentos", "Casa", "Despesas do dia a dia", "Despesas pessoais", "Poupanças", "Transferências", "Outros"]
+CATEGORIAS = ["Rendimentos", "Casa", "Contas", "Despesas pessoais", "Poupanças", "Transferências", "Outros"]
 DESCRICOES_INICIAIS = [
     ("Rendimentos", "Ordenado Miguel"), ("Rendimentos", "Ordenado Júlia"), ("Rendimentos", "Outros rendimentos"), ("Rendimentos", "Reembolsos"),
     ("Casa", "Crédito habitação"), ("Casa", "Seguro de vida"), ("Casa", "Seguro multirriscos"), ("Casa", "Manutenção da conta"), ("Casa", "Condomínio"), ("Casa", "IMI"), ("Casa", "Mobiliário e equipamento"), ("Casa", "Manutenção e reparações"),
-    ("Despesas do dia a dia", "Eletricidade"), ("Despesas do dia a dia", "Água"), ("Despesas do dia a dia", "Gás"), ("Despesas do dia a dia", "Internet"), ("Despesas do dia a dia", "Telecomunicações"), ("Despesas do dia a dia", "Supermercado"), ("Despesas do dia a dia", "Restaurantes e takeaway"), ("Despesas do dia a dia", "Transportes"), ("Despesas do dia a dia", "Saúde"),
+    ("Contas", "Eletricidade"), ("Contas", "Água"), ("Contas", "Gás"), ("Contas", "Internet"), ("Contas", "Telecomunicações"), ("Contas", "Supermercado"), ("Contas", "Restaurantes e takeaway"), ("Contas", "Transportes"), ("Contas", "Saúde"),
     ("Despesas pessoais", "Transferência para Miguel"), ("Despesas pessoais", "Transferência para Júlia"), ("Poupanças", "Transferência para poupança"), ("Transferências", "Transferência entre contas"), ("Outros", "Por classificar"),
 ]
 
@@ -55,6 +55,21 @@ def estado_novo():
         "proximo_id_movimento": 1,
         "proximo_id_regra": 1,
     }
+
+
+def migrar_categoria_contas(dados):
+    categoria_antiga = "Despesas do dia a dia"
+    categoria_nova = "Contas"
+    categorias = [
+        categoria_nova if categoria == categoria_antiga else categoria
+        for categoria in dados.get("categorias", CATEGORIAS)
+    ]
+    dados["categorias"] = list(dict.fromkeys(categorias))
+    for colecao in ("descricoes", "regras", "movimentos"):
+        for item in dados.get(colecao, []):
+            if item.get("categoria") == categoria_antiga:
+                item["categoria"] = categoria_nova
+    return dados
 
 
 def localizar_json_local():
@@ -83,6 +98,7 @@ def carregar_json_local():
         categorias_guardadas = dados.get("categorias", CATEGORIAS)
         base["categorias"] = list(dict.fromkeys(c for c in categorias_guardadas if isinstance(c, str) and c.strip())) or CATEGORIAS.copy()
         base["descricoes"] = list(base.get("descricoes", []))
+        migrar_categoria_contas(base)
         base["proximo_id_movimento"] = max([int(m.get("id", 0)) for m in base["movimentos"]] + [0]) + 1
         base["proximo_id_regra"] = max([int(r.get("id", 0)) for r in base["regras"]] + [0]) + 1
         return base, caminho_json.name
@@ -114,6 +130,8 @@ if "pagina_atual" not in st.session_state:
     st.session_state.pagina_atual = "Resumo mensal"
 if "categoria_descricao_aberta" not in st.session_state:
     st.session_state.categoria_descricao_aberta = None
+if "novo_movimento_nonce" not in st.session_state:
+    st.session_state.novo_movimento_nonce = 0
 
 
 def abrir_importacao():
@@ -380,6 +398,35 @@ def carregar_movimentos():
     return df.sort_values(["data_movimento", "id"], ascending=[False, False], na_position="last")
 
 
+def adicionar_movimento_manual(data_movimento, nome, montante, categoria, descricao_personalizada):
+    dados = st.session_state.dados
+    movimento_id = max([int(m.get("id", 0)) for m in dados["movimentos"]] + [0]) + 1
+    data_movimento = data_iso(data_movimento)
+    nome = str(nome).strip()
+    montante = float(montante)
+    conta = "Conta conjunta"
+    movimento = {
+        "id": movimento_id,
+        "data_movimento": data_movimento,
+        "data_valor": data_movimento,
+        "descricao_original": nome,
+        "montante": montante,
+        "saldo": None,
+        "conta": conta,
+        "categoria": categoria,
+        "descricao_personalizada": descricao_personalizada,
+        "estado": "Manual",
+        "regra_id": None,
+        "excluido": False,
+        "origem_ficheiro": "Manual",
+        "fingerprint": fingerprint_movimento(data_movimento, nome, montante, None, conta),
+    }
+    dados["movimentos"].append(movimento)
+    dados["proximo_id_movimento"] = movimento_id + 1
+    guardar_json_local()
+    return movimento_id
+
+
 def alternar_exclusao_movimento(movimento_id):
     for movimento in st.session_state.dados["movimentos"]:
         if movimento.get("id") == movimento_id:
@@ -390,13 +437,19 @@ def alternar_exclusao_movimento(movimento_id):
 
 def criar_grafico_barras(resumo, campo_categoria, orientacao, escala, selecao=None):
     ordenacao = alt.SortField(field="valor_absoluto", order="descending")
+    altura_horizontal = max(180, 36 * len(resumo))
     if orientacao == "Horizontal":
         eixo_x = alt.X(
             "valor_absoluto:Q",
             title="Valor absoluto (€)",
             scale=alt.Scale(domain=[0, escala]),
+            axis=alt.Axis(values=[0, escala * 0.25, escala * 0.5, escala * 0.75, escala]),
         )
-        eixo_y = alt.Y(f"{campo_categoria}:N", title=None, sort=ordenacao)
+        eixo_y = alt.Y(
+            f"{campo_categoria}:N",
+            title=None,
+            sort=ordenacao,
+        )
         rotulos = alt.Chart(resumo).mark_text(
             align="left",
             baseline="middle",
@@ -404,11 +457,11 @@ def criar_grafico_barras(resumo, campo_categoria, orientacao, escala, selecao=No
             color="#F2C94C",
             fontWeight="bold",
         ).encode(
-            x="valor_absoluto:Q",
+            x=alt.X("valor_absoluto:Q", scale=alt.Scale(domain=[0, escala])),
             y=alt.Y(f"{campo_categoria}:N", sort=ordenacao),
             text="valor_formatado:N",
         )
-        altura = max(180, 36 * len(resumo))
+        altura = altura_horizontal
     else:
         eixo_x = alt.X(
             f"{campo_categoria}:N",
@@ -420,6 +473,7 @@ def criar_grafico_barras(resumo, campo_categoria, orientacao, escala, selecao=No
             "valor_absoluto:Q",
             title="Valor absoluto (€)",
             scale=alt.Scale(domain=[0, escala]),
+            axis=alt.Axis(values=[0, escala * 0.25, escala * 0.5, escala * 0.75, escala]),
         )
         rotulos = alt.Chart(resumo).mark_text(
             align="center",
@@ -429,7 +483,7 @@ def criar_grafico_barras(resumo, campo_categoria, orientacao, escala, selecao=No
             fontWeight="bold",
         ).encode(
             x=alt.X(f"{campo_categoria}:N", sort=ordenacao),
-            y="valor_absoluto:Q",
+            y=alt.Y("valor_absoluto:Q", scale=alt.Scale(domain=[0, escala])),
             text="valor_formatado:N",
         )
         altura = 360
@@ -522,6 +576,7 @@ if pagina == "Importar histórico e novos movimentos":
                 categorias_guardadas = candidato.get("categorias", CATEGORIAS)
                 base["categorias"] = list(dict.fromkeys(c for c in categorias_guardadas if isinstance(c, str) and c.strip())) or CATEGORIAS.copy()
                 base["descricoes"] = list(base.get("descricoes", []))
+                migrar_categoria_contas(base)
                 base["proximo_id_movimento"] = max([int(m.get("id", 0)) for m in base["movimentos"]] + [0]) + 1
                 base["proximo_id_regra"] = max([int(r.get("id", 0)) for r in base["regras"]] + [0]) + 1
                 st.session_state.dados = base
@@ -572,6 +627,7 @@ elif pagina == "Movimentos e regras":
     df = carregar_movimentos()
     if df.empty:
         st.info("Ainda não existem movimentos. Começa por importar um ficheiro.")
+        filtrado = df.copy()
     else:
         col1, col2, col3 = st.columns(3)
         categoria_filtro = col1.selectbox("Filtrar por categoria", ["Todas"] + sorted(df["categoria"].dropna().unique().tolist()))
@@ -581,16 +637,30 @@ elif pagina == "Movimentos e regras":
         if categoria_filtro != "Todas": filtrado = filtrado[filtrado["categoria"] == categoria_filtro]
         if pesquisa: filtrado = filtrado[filtrado["descricao_original"].str.contains(pesquisa, case=False, na=False)]
         if estado_filtro != "Todos": filtrado = filtrado[filtrado["estado"] == estado_filtro]
-        movimentos_tabela = filtrado[["id", "data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado", "excluido"]].copy()
-        movimentos_tabela["Contabilização"] = movimentos_tabela["excluido"].map({True: "Excluído", False: "Incluído"})
-        movimentos_tabela = movimentos_tabela.drop(columns="excluido").rename(columns={"id": "ID", "data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
+        movimentos_tabela = filtrado[["descricao_original", "data_movimento", "montante", "categoria", "descricao_personalizada", "estado"]].copy()
+        movimentos_tabela = movimentos_tabela.rename(columns={"data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
+        movimentos_tabela["Data"] = pd.to_datetime(movimentos_tabela["Data"], errors="coerce").dt.date
         tabela_formatada = movimentos_tabela.style.apply(
-            lambda linha: ["background-color: #8b1e1e; color: white;" if linha["Contabilização"] == "Excluído" else "" for _ in linha],
+            lambda linha: [
+                "background-color: #8b1e1e; color: white;" if bool(filtrado.loc[linha.name, "excluido"])
+                else "background-color: #218739; color: white;" if filtrado.loc[linha.name, "origem_ficheiro"] == "Manual"
+                else ""
+                for _ in linha
+            ],
             axis=1,
         )
-        st.dataframe(tabela_formatada, use_container_width=True, hide_index=True)
-        st.subheader("Editar classificação de um movimento")
-        ids = filtrado["id"].tolist()
+        st.dataframe(
+            tabela_formatada,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Nome": st.column_config.TextColumn("Nome", pinned=True),
+                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+            },
+        )
+
+    ids = filtrado["id"].tolist()
+    with st.expander("＋ Classificar movimento"):
         if ids:
             escolha_id = st.selectbox("Escolhe o movimento", ids, format_func=lambda x: f"#{x} | {filtrado.loc[filtrado['id'] == x, 'data_movimento'].iloc[0]} | {filtrado.loc[filtrado['id'] == x, 'descricao_original'].iloc[0]}")
             movimento = df.loc[df["id"] == escolha_id].iloc[0]
@@ -607,10 +677,32 @@ elif pagina == "Movimentos e regras":
             opcoes = descricoes_por_categoria(categoria_nova) or ["Por classificar"]
             descricao_nova = st.selectbox("Descrição personalizada", opcoes, key=f"descricao_movimento_edicao_{escolha_id}")
             criar_regra = st.checkbox("Criar/atualizar regra automática para movimentos futuros", key=f"criar_regra_movimento_{escolha_id}")
-            if st.button("Guardar classificação", key=f"guardar_classificacao_{escolha_id}"):
+            if st.button("Guardar classificação", key=f"guardar_classificacao_{escolha_id}", type="primary"):
                 descricao_original = filtrado.loc[filtrado["id"] == escolha_id, "descricao_original"].iloc[0]
                 aplicar_classificacao(escolha_id, categoria_nova, descricao_nova, criar_regra, descricao_original)
                 st.success("Classificação guardada no JSON local.")
+                st.rerun()
+        else:
+            st.info("Ainda não existem movimentos para editar.")
+
+    with st.expander("＋ Criar movimento"):
+        movimento_id_novo = max([int(m.get("id", 0)) for m in st.session_state.dados["movimentos"]] + [0]) + 1
+        st.caption(f"Novo movimento · ID #{movimento_id_novo}")
+        nonce = st.session_state.novo_movimento_nonce
+        coluna_data, coluna_nome, coluna_montante = st.columns([1, 3, 1])
+        data_manual = coluna_data.date_input("Data", value=datetime.now().date(), key=f"data_movimento_manual_{nonce}")
+        nome_manual = coluna_nome.text_input("Nome", key=f"nome_movimento_manual_{nonce}")
+        montante_manual = coluna_montante.number_input("Montante (€)", value=0.0, step=0.01, format="%.2f", key=f"montante_movimento_manual_{nonce}")
+        categorias_manuais = categorias_atuais()
+        categoria_manual = st.selectbox("Categoria principal", categorias_manuais, key=f"categoria_movimento_manual_{nonce}")
+        descricoes_manuais = descricoes_por_categoria(categoria_manual) or ["Por classificar"]
+        descricao_manual = st.selectbox("Descrição personalizada", descricoes_manuais, key=f"descricao_movimento_manual_{nonce}_{normalizar_nome(categoria_manual)}")
+        if st.button("Guardar movimento", key=f"guardar_movimento_manual_{nonce}", type="primary"):
+            if not nome_manual.strip():
+                st.error("Escreve o nome do movimento.")
+            else:
+                adicionar_movimento_manual(data_manual, nome_manual, montante_manual, categoria_manual, descricao_manual)
+                st.session_state.novo_movimento_nonce += 1
                 st.rerun()
 
     st.divider()
@@ -741,19 +833,19 @@ else:
             fmt = lambda x: f"{x:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Rendimentos", fmt(rendimentos)); c2.metric("Despesas classificadas", fmt(despesas)); c3.metric("Transferências / poupanças", fmt(transferencias)); c4.metric("Variação líquida dos movimentos", fmt(variacao_saldo))
-            resumo_cat = mensal.groupby("categoria", dropna=False)["montante"].sum().reset_index()
-            resumo_cat["Total de saídas (positivo)"] = resumo_cat["montante"].apply(lambda x: -x if x < 0 else 0)
-            resumo_cat = resumo_cat.rename(columns={"categoria": "Categoria", "montante": "Montante"})
-            with st.expander("Totais por categoria"):
-                st.dataframe(resumo_cat[["Categoria", "Montante", "Total de saídas (positivo)"]], use_container_width=True, hide_index=True)
-            resumo_desc = mensal.groupby(["categoria", "descricao_personalizada"], dropna=False)["montante"].sum().reset_index()
-            resumo_desc = resumo_desc.rename(columns={"categoria": "Categoria", "descricao_personalizada": "Descrição", "montante": "Montante"})
-            with st.expander("Totais por descrição"):
-                st.dataframe(resumo_desc, use_container_width=True, hide_index=True)
-            movimentos_mes = mensal[["data_movimento", "descricao_original", "montante", "categoria", "descricao_personalizada", "estado"]].sort_values("data_movimento", ascending=False)
+            movimentos_mes = mensal[["descricao_original", "data_movimento", "montante", "categoria", "descricao_personalizada", "estado"]].sort_values("data_movimento", ascending=False)
             movimentos_mes = movimentos_mes.rename(columns={"data_movimento": "Data", "descricao_original": "Nome", "montante": "Montante", "categoria": "Categoria", "descricao_personalizada": "Descrição", "estado": "Estado"})
+            movimentos_mes["Data"] = pd.to_datetime(movimentos_mes["Data"], errors="coerce").dt.date
             with st.expander("Movimentos do mês"):
-                st.dataframe(movimentos_mes, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    movimentos_mes,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Nome": st.column_config.TextColumn("Nome", pinned=True),
+                        "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+                    },
+                )
 
             resumo_grafico = mensal.groupby("categoria", dropna=False)["montante"].sum().reset_index()
             resumo_grafico["valor_absoluto"] = resumo_grafico["montante"].abs()
@@ -790,30 +882,29 @@ else:
                 )
             selecao_grafico = evento_grafico.get("selection", {}) if isinstance(evento_grafico, dict) else evento_grafico.selection
             categorias_selecionadas = selecao_grafico.get("categoria_selecionada", [])
-            if categorias_selecionadas:
-                categoria_selecionada = categorias_selecionadas[0].get("categoria")
-                if categoria_selecionada is not None:
-                    with st.expander(f"Detalhe por descrição: {categoria_selecionada}", expanded=True):
-                        detalhe_descricoes = mensal.loc[
-                            mensal["categoria"] == categoria_selecionada
-                        ].groupby("descricao_personalizada", dropna=False)["montante"].sum().reset_index()
-                        detalhe_descricoes["valor_absoluto"] = detalhe_descricoes["montante"].abs()
-                        detalhe_descricoes["sinal"] = detalhe_descricoes["montante"].apply(
-                            lambda valor: "Positivo" if valor > 0 else "Negativo" if valor < 0 else "Sem variação"
-                        )
-                        detalhe_descricoes["valor_formatado"] = detalhe_descricoes["valor_absoluto"].map(fmt)
-                        escala_descricoes = max(float(detalhe_descricoes["valor_absoluto"].max()), 1) * 1.18
-                        orientacao_descricoes = st.segmented_control(
-                            "Orientação do gráfico",
-                            ["Horizontal", "Vertical"],
-                            default="Horizontal",
-                            key="orientacao_grafico_descricoes",
-                        )
-                        grafico_descricoes = criar_grafico_barras(
-                            detalhe_descricoes,
-                            "descricao_personalizada",
-                            orientacao_descricoes or "Horizontal",
-                            escala_descricoes,
-                        )
-                        st.altair_chart(grafico_descricoes, width="stretch")
+            categoria_selecionada = categorias_selecionadas[0].get("categoria") if categorias_selecionadas else None
+            if categoria_selecionada is not None:
+                with st.expander(f"Detalhe por descrição: {categoria_selecionada}", expanded=True):
+                    detalhe_descricoes = mensal.loc[
+                        mensal["categoria"] == categoria_selecionada
+                    ].groupby("descricao_personalizada", dropna=False)["montante"].sum().reset_index()
+                    detalhe_descricoes["valor_absoluto"] = detalhe_descricoes["montante"].abs()
+                    detalhe_descricoes["sinal"] = detalhe_descricoes["montante"].apply(
+                        lambda valor: "Positivo" if valor > 0 else "Negativo" if valor < 0 else "Sem variação"
+                    )
+                    detalhe_descricoes["valor_formatado"] = detalhe_descricoes["valor_absoluto"].map(fmt)
+                    escala_descricoes = max(float(detalhe_descricoes["valor_absoluto"].max()), 1) * 1.18
+                    orientacao_descricoes = st.segmented_control(
+                        "Orientação do gráfico",
+                        ["Horizontal", "Vertical"],
+                        default="Horizontal",
+                        key="orientacao_grafico_descricoes",
+                    )
+                    grafico_descricoes = criar_grafico_barras(
+                        detalhe_descricoes,
+                        "descricao_personalizada",
+                        orientacao_descricoes or "Horizontal",
+                        escala_descricoes,
+                    )
+                    st.altair_chart(grafico_descricoes, width="stretch")
 
