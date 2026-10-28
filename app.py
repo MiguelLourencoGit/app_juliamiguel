@@ -5,7 +5,7 @@ import json
 import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 import altair as alt
@@ -177,6 +177,11 @@ def data_iso(valor):
         except ValueError:
             pass
     return texto
+
+
+def formatar_euros(valor):
+    valor_decimal = Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{valor_decimal:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def fingerprint_movimento(data, descricao, montante, saldo, conta):
@@ -547,7 +552,7 @@ st.sidebar.button(
 )
 st.sidebar.divider()
 st.sidebar.subheader("Navegação")
-for pagina_navegacao in ("Resumo mensal", "Movimentos e regras", "Categorias e descrições"):
+for pagina_navegacao in ("Resumo mensal", "Movimentos e regras", "Categorias e descrições", "Calculadora"):
     st.sidebar.button(
         pagina_navegacao,
         type="primary" if st.session_state.pagina_atual == pagina_navegacao else "secondary",
@@ -807,6 +812,141 @@ elif pagina == "Categorias e descrições":
                         if cancelar_desc:
                             st.session_state.categoria_descricao_aberta = None
                             st.rerun()
+
+elif pagina == "Calculadora":
+    st.header("Calculadora")
+    movimentos_calculadora = carregar_movimentos()
+    if not movimentos_calculadora.empty:
+        movimentos_calculadora = movimentos_calculadora.loc[~movimentos_calculadora["excluido"]].copy()
+        movimentos_calculadora["data_movimento"] = pd.to_datetime(movimentos_calculadora["data_movimento"], errors="coerce")
+        movimentos_calculadora = movimentos_calculadora.loc[movimentos_calculadora["data_movimento"].notna()].copy()
+
+    if movimentos_calculadora.empty:
+        st.info("Importa movimentos com data e classificação para utilizar a calculadora.")
+    else:
+        movimentos_calculadora["mes"] = movimentos_calculadora["data_movimento"].dt.strftime("%Y-%m")
+        meses_calculadora = sorted(movimentos_calculadora["mes"].unique().tolist(), reverse=True)
+        mes_calculadora = st.selectbox("Mês", meses_calculadora, key="mes_calculadora")
+        mensal_calculadora = movimentos_calculadora.loc[
+            movimentos_calculadora["mes"] == mes_calculadora
+        ].copy()
+
+        salarios = mensal_calculadora.loc[
+            (mensal_calculadora["categoria"] == "Rendimentos")
+            & (mensal_calculadora["montante"] > 0)
+        ]
+        ordenado_miguel = float(salarios.loc[
+            salarios["descricao_personalizada"].str.casefold() == "ordenado miguel".casefold(),
+            "montante",
+        ].sum())
+        ordenado_julia = float(salarios.loc[
+            salarios["descricao_personalizada"].str.casefold() == "ordenado júlia".casefold(),
+            "montante",
+        ].sum())
+        rendimento_agregado = ordenado_miguel + ordenado_julia
+        if rendimento_agregado > 0:
+            esforco_miguel = ordenado_miguel / rendimento_agregado
+            esforco_julia = ordenado_julia / rendimento_agregado
+        else:
+            esforco_miguel = esforco_julia = 0.5
+
+        st.subheader("Rendimentos e esforço")
+        esforco_miguel_formatado = f"{esforco_miguel:.1%}".replace(".", ",")
+        esforco_julia_formatado = f"{esforco_julia:.1%}".replace(".", ",")
+        col_miguel, col_julia, col_total = st.columns(3)
+        col_miguel.metric(
+            f"Ordenado do Miguel (% Esforço)",
+            f"{formatar_euros(ordenado_miguel)} ({esforco_miguel_formatado})",
+        )
+        col_julia.metric(
+            f"Ordenado da Júlia (% Esforço)",
+            f"{formatar_euros(ordenado_julia)} ({esforco_julia_formatado})",
+        )
+        col_total.metric("Rendimento total do agregado", formatar_euros(rendimento_agregado))
+        if rendimento_agregado <= 0:
+            st.caption("Sem ordenados classificados neste mês; a divisão por esforço usa 50/50 até existirem rendimentos.")
+
+        categorias_despesas = [categoria for categoria in categorias_atuais() if categoria != "Rendimentos"]
+        categorias_pre_selecionadas = [categoria for categoria in ("Casa", "Contas") if categoria in categorias_despesas]
+        with st.expander("Despesas por pessoa", expanded=True):
+            categorias_escolhidas = st.multiselect(
+                "Categorias incluídas nas despesas comuns",
+                categorias_despesas,
+                default=categorias_pre_selecionadas,
+                key=f"categorias_despesas_{normalizar_nome(mes_calculadora)}",
+            )
+            despesas_por_categoria = {}
+            metodos_por_categoria = {}
+            for categoria in categorias_escolhidas:
+                montante_categoria = float(
+                    mensal_calculadora.loc[
+                        mensal_calculadora["categoria"] == categoria,
+                        "montante",
+                    ].sum()
+                )
+                despesa_categoria = max(0.0, -montante_categoria)
+                despesas_por_categoria[categoria] = despesa_categoria
+                coluna_categoria, coluna_total, coluna_metodo = st.columns([2, 1, 2])
+                coluna_categoria.write(categoria)
+                coluna_total.write(formatar_euros(despesa_categoria))
+                metodos_por_categoria[categoria] = coluna_metodo.segmented_control(
+                    f"Divisão · {categoria}",
+                    ["50/50", "Por esforço"],
+                    default="Por esforço",
+                    key=f"metodo_divisao_{normalizar_nome(mes_calculadora)}_{normalizar_nome(categoria)}",
+                    label_visibility="collapsed",
+                    width="stretch",
+                ) or "Por esforço"
+
+            linhas_despesas = []
+            total_despesas = total_miguel = total_julia = 0.0
+            for categoria in categorias_escolhidas:
+                despesa = despesas_por_categoria[categoria]
+                metodo = metodos_por_categoria[categoria]
+                proporcao_miguel = 0.5 if metodo == "50/50" else esforco_miguel
+                parte_miguel = despesa * proporcao_miguel
+                parte_julia = despesa - parte_miguel
+                total_despesas += despesa
+                total_miguel += parte_miguel
+                total_julia += parte_julia
+                linhas_despesas.append({
+                    "Categoria": categoria,
+                    "Despesa": formatar_euros(despesa),
+                    "Método": metodo,
+                    "Miguel paga": formatar_euros(parte_miguel),
+                    "Júlia paga": formatar_euros(parte_julia),
+                })
+            linhas_despesas.append({
+                "Categoria": "Total",
+                "Despesa": formatar_euros(total_despesas),
+                "Método": "",
+                "Miguel paga": formatar_euros(total_miguel),
+                "Júlia paga": formatar_euros(total_julia),
+            })
+            st.dataframe(pd.DataFrame(linhas_despesas), use_container_width=True, hide_index=True)
+
+        with st.expander("Dinheiro disponível para contas pessoais", expanded=True):
+            dinheiro_pessoal = pd.DataFrame([
+                {
+                    "Pessoa": "Miguel",
+                    "Dinheiro para conta pessoal": formatar_euros(ordenado_miguel - total_miguel),
+                },
+                {
+                    "Pessoa": "Júlia",
+                    "Dinheiro para conta pessoal": formatar_euros(ordenado_julia - total_julia),
+                },
+            ])
+            st.dataframe(
+                dinheiro_pessoal,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Dinheiro para conta pessoal": st.column_config.TextColumn(
+                        "Dinheiro para conta pessoal",
+                        help="Ordenado individual menos as despesas atribuídas na secção 'Despesas por pessoa'.",
+                    ),
+                },
+            )
 
 else:
     st.title("💶 Finanças do casal")
